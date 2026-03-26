@@ -2,60 +2,76 @@ const express = require("express");
 const https   = require("https");
 const app     = express();
 
-app.use(express.json());
+app.use(express.json({ limit: "10mb" }));
 app.use((req, res, next) => {
   res.header("Access-Control-Allow-Origin", "*");
   next();
 });
 
-const BOT_TOKEN  = "8268677697:AAF2dRwMDrHaopeXU5S2Dt42vDuto4mJD5Q";
-const CHANNEL_ID = "@SimonUkraine";
-const DATA_TAG   = "SIMON_DATA_V1";
+const BOT_TOKEN = "8268677697:AAF2dRwMDrHaopeXU5S2Dt42vDuto4mJD5Q";
+const DATA_TAG  = "SIMON_DATA_V1";
 
 let cachedData = null;
 let lastUpdate = 0;
+let lastMsgId  = null;
 
-// Telegram API запит
-function tgGet(method, params) {
+function tgRequest(method, params) {
   return new Promise((resolve, reject) => {
-    const query = new URLSearchParams(params).toString();
-    const url = `https://api.telegram.org/bot${BOT_TOKEN}/${method}?${query}`;
-    https.get(url, (res) => {
+    const postData = JSON.stringify(params);
+    const options = {
+      hostname: "api.telegram.org",
+      path: `/bot${BOT_TOKEN}/${method}`,
+      method: "POST",
+      headers: {
+        "Content-Type": "application/json",
+        "Content-Length": Buffer.byteLength(postData)
+      }
+    };
+    const req = https.request(options, (res) => {
       let data = "";
       res.on("data", chunk => data += chunk);
       res.on("end", () => {
         try { resolve(JSON.parse(data)); }
         catch(e) { reject(e); }
       });
-    }).on("error", reject);
+    });
+    req.on("error", reject);
+    req.write(postData);
+    req.end();
   });
 }
 
-// Читаємо останнє повідомлення з каналу з тегом SIMON_DATA_V1
 async function syncFromChannel() {
   try {
-    const result = await tgGet("getUpdates", {
-      limit: 10,
-      allowed_updates: "channel_post"
+    // Метод 1: getUpdates з channel_post
+    const result = await tgRequest("getUpdates", {
+      limit: 100,
+      allowed_updates: ["channel_post", "message"]
     });
 
-    if (!result.ok || !result.result.length) return;
-
-    // Шукаємо повідомлення з тегом
-    for (let i = result.result.length - 1; i >= 0; i--) {
-      const post = result.result[i].channel_post;
-      if (post && post.chat && post.chat.username === "SimonUkraine" &&
-          post.text && post.text.startsWith(DATA_TAG)) {
-        const jsonStr = post.text.replace(DATA_TAG + "\n", "");
-        cachedData = JSON.parse(jsonStr);
-        lastUpdate = Date.now();
-        console.log("Synced from channel:", new Date().toISOString(),
-          "players:", cachedData.total_players);
-        break;
+    if (result.ok && result.result && result.result.length > 0) {
+      for (let i = result.result.length - 1; i >= 0; i--) {
+        const upd  = result.result[i];
+        const post = upd.channel_post || upd.message;
+        if (post && post.text && post.text.startsWith(DATA_TAG)) {
+          const jsonStr = post.text.substring(DATA_TAG.length).trim();
+          cachedData = JSON.parse(jsonStr);
+          lastUpdate = Date.now();
+          lastMsgId  = post.message_id;
+          console.log("✅ Synced! Players:", cachedData.total_players,
+            "at", new Date().toISOString());
+          return true;
+        }
       }
+      console.log("No SIMON_DATA_V1 found in", result.result.length, "updates");
+      console.log("Sample:", JSON.stringify(result.result[0]).substring(0, 200));
+    } else {
+      console.log("getUpdates result:", JSON.stringify(result).substring(0, 300));
     }
+    return false;
   } catch(e) {
     console.error("Sync error:", e.message);
+    return false;
   }
 }
 
@@ -63,26 +79,33 @@ async function syncFromChannel() {
 syncFromChannel();
 setInterval(syncFromChannel, 30000);
 
-// ===== GET /data =====
 app.get("/data", (req, res) => {
   if (!cachedData) {
-    return res.status(404).json({
-      ok: false,
-      error: "No data yet. Write /start to bot first."
-    });
+    return res.status(404).json({ ok: false, error: "No data yet" });
   }
   res.json({ ok: true, data: cachedData, updated: lastUpdate });
 });
 
-// ===== GET /health =====
 app.get("/health", (req, res) => {
-  res.json({ ok: true, has_data: !!cachedData, updated: lastUpdate });
+  res.json({ ok: true, has_data: !!cachedData, updated: lastUpdate, last_msg_id: lastMsgId });
 });
 
-// ===== GET /sync — примусова синхронізація =====
 app.get("/sync", async (req, res) => {
-  await syncFromChannel();
-  res.json({ ok: true, has_data: !!cachedData, updated: lastUpdate });
+  const ok = await syncFromChannel();
+  res.json({ ok, has_data: !!cachedData, updated: lastUpdate });
 });
 
-app.listen(3000, () => console.log("Simon proxy v2 running"));
+// Діагностика — показує що приходить від Telegram
+app.get("/debug", async (req, res) => {
+  try {
+    const result = await tgRequest("getUpdates", {
+      limit: 5,
+      allowed_updates: ["channel_post", "message"]
+    });
+    res.json(result);
+  } catch(e) {
+    res.json({ error: e.message });
+  }
+});
+
+app.listen(3000, () => console.log("Simon proxy v3 running"));
