@@ -46,14 +46,15 @@ async function syncFromChannel() {
     // Метод 1: getUpdates з channel_post
     const result = await tgRequest("getUpdates", {
       limit: 100,
-      allowed_updates: ["channel_post", "message"]
+      allowed_updates: ["message"]
     });
 
     if (result.ok && result.result && result.result.length > 0) {
       for (let i = result.result.length - 1; i >= 0; i--) {
         const upd  = result.result[i];
-        const post = upd.channel_post || upd.message;
-        if (post && post.text && post.text.startsWith(DATA_TAG)) {
+        const post = upd.message;
+        if (post && post.text && post.text.startsWith(DATA_TAG) &&
+            post.chat && post.chat.id === 1739408129) {
           const jsonStr = post.text.substring(DATA_TAG.length).trim();
           cachedData = JSON.parse(jsonStr);
           lastUpdate = Date.now();
@@ -100,7 +101,7 @@ app.get("/debug", async (req, res) => {
   try {
     const result = await tgRequest("getUpdates", {
       limit: 5,
-      allowed_updates: ["channel_post", "message"]
+      allowed_updates: ["message"]
     });
     res.json(result);
   } catch(e) {
